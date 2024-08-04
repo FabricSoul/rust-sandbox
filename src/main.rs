@@ -8,10 +8,10 @@ use crate::camera::{edge_scrolling, zoom_camera, RotatingCamera};
 
 // Constants
 const WALL_THICKNESS: f32 = 1.0;
-const LEFT_WALL: f32 = -900.;
-const RIGHT_WALL: f32 = 900.;
-const BOTTOM_WALL: f32 = -600.;
-const TOP_WALL: f32 = 600.;
+const LEFT_WALL: f32 = -3600.;
+const RIGHT_WALL: f32 = 3600.;
+const BOTTOM_WALL: f32 = -2400.;
+const TOP_WALL: f32 = 2400.;
 const WALL_COLOR: Color = Color::srgb(0.0, 0.0, 0.0);
 const CHUNK_SIZE: f32 = 10.0;
 const MATRIX_WIDTH: usize = ((RIGHT_WALL - LEFT_WALL) / CHUNK_SIZE) as usize;
@@ -31,6 +31,7 @@ enum Particle {
     Solid,
     Gas,
     Smoke,
+    Erase,
 }
 
 impl Particle {
@@ -41,9 +42,13 @@ impl Particle {
             Particle::Solid => Color::srgb(0.5, 0.5, 0.5),
             Particle::Gas => Color::srgb(0.8, 1.0, 0.8),
             Particle::Smoke => Color::srgb(0.5, 0.5, 0.5),
+            Particle::Erase => Color::srgba(1.0, 0.0, 0.0, 0.5),
         }
     }
 }
+
+#[derive(Component)]
+struct PlacementShape;
 
 // Resources
 #[derive(Resource)]
@@ -65,6 +70,21 @@ struct SelectedParticle(Particle);
 #[derive(Resource)]
 struct MouseState {
     button_pressed: bool,
+}
+
+#[derive(Resource)]
+struct PlacementSize {
+    size: f32,
+    position: Vec2,
+}
+
+impl PlacementSize {
+    fn new() -> Self {
+        PlacementSize {
+            size: 10.0,
+            position: Vec2::ZERO,
+        }
+    }
 }
 
 // Systems
@@ -124,27 +144,78 @@ fn update_mouse_state(
     }
 }
 
-fn handle_input(
+fn update_placement_shape(
     mut commands: Commands,
     window_query: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<RotatingCamera>>,
+    mut placement_size: ResMut<PlacementSize>,
+    mut placement_shape_query: Query<(Entity, &mut Transform, &mut Sprite), With<PlacementShape>>,
+    selected_particle: Res<SelectedParticle>,
+) {
+    let window = window_query.single();
+    let (camera, camera_transform) = camera_query.single();
+
+    if let Some(world_position) = window
+        .cursor_position()
+        .and_then(|cursor| camera.viewport_to_world(camera_transform, cursor))
+        .map(|ray| ray.origin.truncate())
+    {
+        // Check if the mouse position is within bounds
+        if world_position.x >= LEFT_WALL
+            && world_position.x <= RIGHT_WALL
+            && world_position.y >= BOTTOM_WALL
+            && world_position.y <= TOP_WALL
+        {
+            placement_size.position = world_position;
+
+            let half_size = placement_size.size / 2.0;
+            let top_left = Vec2::new(
+                (world_position.x - half_size).max(LEFT_WALL),
+                (world_position.y + half_size).min(TOP_WALL),
+            );
+            let bottom_right = Vec2::new(
+                (world_position.x + half_size).min(RIGHT_WALL),
+                (world_position.y - half_size).max(BOTTOM_WALL),
+            );
+            let size = bottom_right - top_left;
+            let center = (top_left + bottom_right) / 2.0;
+
+            // Determine the color based on the selected particle
+            let color = match selected_particle.0 {
+                Particle::Erase => Color::rgba(1.0, 0.0, 0.0, 0.2), // Semi-transparent red for Erase
+                _ => Color::rgba(1.0, 1.0, 1.0, 0.2), // Default color for other particles
+            };
+
+            if let Ok((_, mut transform, mut sprite)) = placement_shape_query.get_single_mut() {
+                transform.translation = center.extend(2.0);
+                sprite.custom_size = Some(size);
+                sprite.color = color; // Update the color
+            } else {
+                commands
+                    .spawn(SpriteBundle {
+                        transform: Transform::from_translation(center.extend(2.0)),
+                        sprite: Sprite {
+                            color,
+                            custom_size: Some(size),
+                            ..default()
+                        },
+                        ..default()
+                    })
+                    .insert(PlacementShape);
+            }
+        }
+    }
+}
+
+fn handle_input(
+    mut commands: Commands,
     mouse_state: Res<MouseState>,
     mut keyboard_input: EventReader<KeyboardInput>,
     mut particle_matrix: ResMut<ParticleMatrix>,
     mut selected_particle: ResMut<SelectedParticle>,
+    mut placement_size: ResMut<PlacementSize>,
 ) {
     // Update selected particle
-    // for (key, particle) in [
-    //     (KeyCode::Digit1, Particle::Sand),
-    //     (KeyCode::Digit2, Particle::Liquid),
-    //     (KeyCode::Digit3, Particle::Solid),
-    //     (KeyCode::Digit4, Particle::Gas),
-    //     (KeyCode::Digit5, Particle::Smoke),
-    // ] {
-    //     if keys.just_pressed(key) {
-    //         selected_particle.0 = particle;
-    //     }
-    // }
     for event in keyboard_input.read() {
         match event.key_code {
             KeyCode::Digit1 => selected_particle.0 = Particle::Sand,
@@ -152,39 +223,54 @@ fn handle_input(
             KeyCode::Digit3 => selected_particle.0 = Particle::Solid,
             KeyCode::Digit4 => selected_particle.0 = Particle::Gas,
             KeyCode::Digit5 => selected_particle.0 = Particle::Smoke,
+            KeyCode::Digit0 => selected_particle.0 = Particle::Erase,
+            KeyCode::Minus => {
+                placement_size.size = (placement_size.size - 10.0).max(10.0);
+            }
+            KeyCode::Equal => {
+                placement_size.size = (placement_size.size + 10.0).min(100.0);
+            }
             _ => {}
         }
     }
 
-    // Handle mouse input
+    // Handle mouse input for particle placement or erasure
     if mouse_state.button_pressed {
-        let window = window_query.single();
-        let (camera, camera_transform) = camera_query.single();
+        let half_size = placement_size.size / 2.0;
+        let top_left = Vec2::new(
+            (placement_size.position.x - half_size).max(LEFT_WALL),
+            (placement_size.position.y + half_size).min(TOP_WALL),
+        );
+        let bottom_right = Vec2::new(
+            (placement_size.position.x + half_size).min(RIGHT_WALL),
+            (placement_size.position.y - half_size).max(BOTTOM_WALL),
+        );
 
-        if let Some(world_position) = window
-            .cursor_position()
-            .and_then(|cursor| camera.viewport_to_world(camera_transform, cursor))
-            .map(|ray| ray.origin.truncate())
-        {
-            if world_position.x > LEFT_WALL
-                && world_position.x < RIGHT_WALL
-                && world_position.y > BOTTOM_WALL
-                && world_position.y < TOP_WALL
-            {
-                let matrix_x = ((world_position.x - LEFT_WALL) / CHUNK_SIZE) as usize;
-                let matrix_y = ((world_position.y - BOTTOM_WALL) / CHUNK_SIZE) as usize;
+        for y in (bottom_right.y as i32..=top_left.y as i32).step_by(CHUNK_SIZE as usize) {
+            for x in (top_left.x as i32..=bottom_right.x as i32).step_by(CHUNK_SIZE as usize) {
+                let matrix_x = ((x as f32 - LEFT_WALL) / CHUNK_SIZE) as usize;
+                let matrix_y = ((y as f32 - BOTTOM_WALL) / CHUNK_SIZE) as usize;
 
-                if matrix_y < MATRIX_HEIGHT
-                    && matrix_x < MATRIX_WIDTH
-                    && particle_matrix.matrix[matrix_y][matrix_x].is_none()
-                {
-                    spawn_particle(
-                        &mut commands,
-                        &mut particle_matrix,
-                        matrix_x,
-                        matrix_y,
-                        selected_particle.0.clone(),
-                    );
+                if matrix_y < MATRIX_HEIGHT && matrix_x < MATRIX_WIDTH {
+                    match selected_particle.0 {
+                        Particle::Erase => {
+                            if let Some(entity) = particle_matrix.matrix[matrix_y][matrix_x] {
+                                commands.entity(entity).despawn();
+                                particle_matrix.matrix[matrix_y][matrix_x] = None;
+                            }
+                        }
+                        _ => {
+                            if particle_matrix.matrix[matrix_y][matrix_x].is_none() {
+                                spawn_particle(
+                                    &mut commands,
+                                    &mut particle_matrix,
+                                    matrix_x,
+                                    matrix_y,
+                                    selected_particle.0.clone(),
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -238,6 +324,7 @@ fn update_particles(
             Particle::Solid => (position.x, position.y),
             Particle::Gas => simulate_gas(position.x, position.y, &particle_matrix, &mut rng),
             Particle::Smoke => simulate_smoke(position.x, position.y, &particle_matrix, &mut rng),
+            Particle::Erase => continue,
         };
 
         if new_x != position.x || new_y != position.y {
@@ -454,11 +541,13 @@ fn main() {
         .insert_resource(MouseState {
             button_pressed: false,
         })
+        .insert_resource(PlacementSize::new())
         .add_systems(
             Update,
             (
                 edge_scrolling,
                 zoom_camera,
+                update_placement_shape,
                 handle_input,
                 update_particles,
                 update_mouse_state,
@@ -466,3 +555,4 @@ fn main() {
         )
         .run();
 }
+
