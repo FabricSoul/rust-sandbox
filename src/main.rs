@@ -1,198 +1,116 @@
-use bevy::input::mouse::MouseButtonInput;
+use bevy::input::{keyboard::KeyboardInput, mouse::MouseButtonInput};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
+use rand::{prelude::SliceRandom, Rng};
 
 mod camera;
 use crate::camera::{edge_scrolling, zoom_camera, RotatingCamera};
 
+// Constants
 const WALL_THICKNESS: f32 = 1.0;
-// x coordinates
 const LEFT_WALL: f32 = -900.;
 const RIGHT_WALL: f32 = 900.;
-// y coordinates
 const BOTTOM_WALL: f32 = -600.;
 const TOP_WALL: f32 = 600.;
 const WALL_COLOR: Color = Color::srgb(0.0, 0.0, 0.0);
-
-// Chunk
-const LINE_COLOR: Color = Color::srgb(0.0, 0.0, 0.0);
 const CHUNK_SIZE: f32 = 10.0;
-const LINE_THICKNESS: f32 = 1.0;
-
-// Square
-const SQUARE_COLOR: Color = Color::srgb(1.0, 1.0, 0.6);
-
-// New constants for falling
-const GRAVITY: f32 = 1.0; // Pixels per second squared
-                          //
 const MATRIX_WIDTH: usize = ((RIGHT_WALL - LEFT_WALL) / CHUNK_SIZE) as usize;
 const MATRIX_HEIGHT: usize = ((TOP_WALL - BOTTOM_WALL) / CHUNK_SIZE) as usize;
 
+// Components
 #[derive(Component)]
-struct ChunkSquare;
+struct Position {
+    x: usize,
+    y: usize,
+}
+
+#[derive(Component, Clone)]
+enum Particle {
+    Sand,
+    Liquid,
+    Solid,
+    Gas,
+    Smoke,
+}
+
+impl Particle {
+    fn color(&self) -> Color {
+        match self {
+            Particle::Sand => Color::srgb(1.0, 1.0, 0.6),
+            Particle::Liquid => Color::srgb(0.0, 0.0, 1.0),
+            Particle::Solid => Color::srgb(0.5, 0.5, 0.5),
+            Particle::Gas => Color::srgb(0.8, 1.0, 0.8),
+            Particle::Smoke => Color::srgb(0.5, 0.5, 0.5),
+        }
+    }
+}
+
+// Resources
+#[derive(Resource)]
+struct ParticleMatrix {
+    matrix: Vec<Vec<Option<Entity>>>,
+}
+
+impl ParticleMatrix {
+    fn new() -> Self {
+        ParticleMatrix {
+            matrix: vec![vec![None; MATRIX_WIDTH]; MATRIX_HEIGHT],
+        }
+    }
+}
 
 #[derive(Resource)]
-struct ChunkMatrix {
-    matrix: Vec<Vec<bool>>,
-    entities: Vec<Vec<Option<Entity>>>,
-}
-
-#[derive(Bundle)]
-struct WallBundle {
-    sprite_bundle: SpriteBundle,
-}
+struct SelectedParticle(Particle);
 
 #[derive(Resource)]
 struct MouseState {
     button_pressed: bool,
 }
 
-enum WallLocation {
-    Left,
-    Right,
-    Bottom,
-    Top,
-}
-
-impl WallLocation {
-    fn position(&self) -> Vec2 {
-        match self {
-            WallLocation::Left => Vec2::new(LEFT_WALL, 0.),
-            WallLocation::Right => Vec2::new(RIGHT_WALL, 0.),
-            WallLocation::Bottom => Vec2::new(0., BOTTOM_WALL),
-            WallLocation::Top => Vec2::new(0., TOP_WALL),
-        }
-    }
-
-    fn size(&self) -> Vec2 {
-        let arena_height = TOP_WALL - BOTTOM_WALL;
-        let arena_width = RIGHT_WALL - LEFT_WALL;
-        assert!(arena_height > 0.0);
-        assert!(arena_width > 0.0);
-
-        match self {
-            WallLocation::Left | WallLocation::Right => {
-                Vec2::new(WALL_THICKNESS, arena_height + WALL_THICKNESS)
-            }
-            WallLocation::Bottom | WallLocation::Top => {
-                Vec2::new(arena_width + WALL_THICKNESS, WALL_THICKNESS)
-            }
-        }
-    }
-}
-
-impl WallBundle {
-    fn new(location: WallLocation) -> WallBundle {
-        WallBundle {
-            sprite_bundle: SpriteBundle {
-                transform: Transform {
-                    translation: location.position().extend(0.0),
-                    scale: location.size().extend(1.0),
-                    ..default()
-                },
-                sprite: Sprite {
-                    color: WALL_COLOR,
-                    ..default()
-                },
-                ..default()
-            },
-        }
-    }
-}
-
-impl ChunkMatrix {
-    fn new() -> Self {
-        ChunkMatrix {
-            matrix: vec![vec![false; MATRIX_WIDTH]; MATRIX_HEIGHT],
-            entities: vec![vec![None; MATRIX_WIDTH]; MATRIX_HEIGHT],
-        }
-    }
-}
-
-#[derive(Component)]
-struct ChunkLine;
-
-fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins)
-        .insert_resource(ChunkMatrix::new())
-        .insert_resource(MouseState {
-            button_pressed: false,
-        })
-        .add_systems(Startup, setup)
-        .add_systems(
-            Update,
-            (
-                edge_scrolling,
-                zoom_camera,
-                update_mouse_state,
-                handle_input,
-                apply_custom_physics,
-            ),
-        )
-        .run();
-}
-
+// Systems
 fn setup(mut commands: Commands) {
     commands
         .spawn(Camera2dBundle::default())
         .insert(RotatingCamera);
+    commands.insert_resource(ParticleMatrix::new());
+    commands.insert_resource(SelectedParticle(Particle::Sand));
 
-    // Walls
-    commands.spawn(WallBundle::new(WallLocation::Left));
-    commands.spawn(WallBundle::new(WallLocation::Right));
-    commands.spawn(WallBundle::new(WallLocation::Bottom));
-    commands.spawn(WallBundle::new(WallLocation::Top));
-
-    // Draw Chunk Lines
-    draw_chunk_lines(&mut commands);
+    // Spawn walls
+    spawn_wall(&mut commands, WallLocation::Left);
+    spawn_wall(&mut commands, WallLocation::Right);
+    spawn_wall(&mut commands, WallLocation::Bottom);
+    spawn_wall(&mut commands, WallLocation::Top);
 }
 
-fn draw_chunk_lines(commands: &mut Commands) {
-    let arena_width = RIGHT_WALL - LEFT_WALL;
-    let arena_height = TOP_WALL - BOTTOM_WALL;
+fn spawn_wall(commands: &mut Commands, location: WallLocation) {
+    let (position, size) = match location {
+        WallLocation::Left => (
+            Vec2::new(LEFT_WALL, 0.),
+            Vec2::new(WALL_THICKNESS, TOP_WALL - BOTTOM_WALL + WALL_THICKNESS),
+        ),
+        WallLocation::Right => (
+            Vec2::new(RIGHT_WALL, 0.),
+            Vec2::new(WALL_THICKNESS, TOP_WALL - BOTTOM_WALL + WALL_THICKNESS),
+        ),
+        WallLocation::Bottom => (
+            Vec2::new(0., BOTTOM_WALL),
+            Vec2::new(RIGHT_WALL - LEFT_WALL + WALL_THICKNESS, WALL_THICKNESS),
+        ),
+        WallLocation::Top => (
+            Vec2::new(0., TOP_WALL),
+            Vec2::new(RIGHT_WALL - LEFT_WALL + WALL_THICKNESS, WALL_THICKNESS),
+        ),
+    };
 
-    // Vertical lines
-    for x in (LEFT_WALL as i32..=RIGHT_WALL as i32).step_by(CHUNK_SIZE as usize) {
-        if x != LEFT_WALL as i32 && x != RIGHT_WALL as i32 {
-            commands.spawn((
-                SpriteBundle {
-                    transform: Transform {
-                        translation: Vec3::new(x as f32, 0.0, 0.0),
-                        scale: Vec3::new(LINE_THICKNESS, arena_height, 1.0),
-                        ..default()
-                    },
-                    sprite: Sprite {
-                        color: LINE_COLOR,
-                        ..default()
-                    },
-                    ..default()
-                },
-                ChunkLine,
-            ));
-        }
-    }
-
-    // Horizontal lines
-    for y in (BOTTOM_WALL as i32..=TOP_WALL as i32).step_by(CHUNK_SIZE as usize) {
-        if y != BOTTOM_WALL as i32 && y != TOP_WALL as i32 {
-            commands.spawn((
-                SpriteBundle {
-                    transform: Transform {
-                        translation: Vec3::new(0.0, y as f32, 0.0),
-                        scale: Vec3::new(arena_width, LINE_THICKNESS, 1.0),
-                        ..default()
-                    },
-                    sprite: Sprite {
-                        color: LINE_COLOR,
-                        ..default()
-                    },
-                    ..default()
-                },
-                ChunkLine,
-            ));
-        }
-    }
+    commands.spawn(SpriteBundle {
+        transform: Transform::from_translation(position.extend(0.0)),
+        sprite: Sprite {
+            color: WALL_COLOR,
+            custom_size: Some(size),
+            ..default()
+        },
+        ..default()
+    });
 }
 
 fn update_mouse_state(
@@ -211,8 +129,34 @@ fn handle_input(
     window_query: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<RotatingCamera>>,
     mouse_state: Res<MouseState>,
-    mut chunk_matrix: ResMut<ChunkMatrix>,
+    mut keyboard_input: EventReader<KeyboardInput>,
+    mut particle_matrix: ResMut<ParticleMatrix>,
+    mut selected_particle: ResMut<SelectedParticle>,
 ) {
+    // Update selected particle
+    // for (key, particle) in [
+    //     (KeyCode::Digit1, Particle::Sand),
+    //     (KeyCode::Digit2, Particle::Liquid),
+    //     (KeyCode::Digit3, Particle::Solid),
+    //     (KeyCode::Digit4, Particle::Gas),
+    //     (KeyCode::Digit5, Particle::Smoke),
+    // ] {
+    //     if keys.just_pressed(key) {
+    //         selected_particle.0 = particle;
+    //     }
+    // }
+    for event in keyboard_input.read() {
+        match event.key_code {
+            KeyCode::Digit1 => selected_particle.0 = Particle::Sand,
+            KeyCode::Digit2 => selected_particle.0 = Particle::Liquid,
+            KeyCode::Digit3 => selected_particle.0 = Particle::Solid,
+            KeyCode::Digit4 => selected_particle.0 = Particle::Gas,
+            KeyCode::Digit5 => selected_particle.0 = Particle::Smoke,
+            _ => {}
+        }
+    }
+
+    // Handle mouse input
     if mouse_state.button_pressed {
         let window = window_query.single();
         let (camera, camera_transform) = camera_query.single();
@@ -232,126 +176,293 @@ fn handle_input(
 
                 if matrix_y < MATRIX_HEIGHT
                     && matrix_x < MATRIX_WIDTH
-                    && !chunk_matrix.matrix[matrix_y][matrix_x]
+                    && particle_matrix.matrix[matrix_y][matrix_x].is_none()
                 {
-                    let chunk_position = Vec2::new(
-                        LEFT_WALL + (matrix_x as f32 + 0.5) * CHUNK_SIZE,
-                        BOTTOM_WALL + (matrix_y as f32 + 0.5) * CHUNK_SIZE,
+                    spawn_particle(
+                        &mut commands,
+                        &mut particle_matrix,
+                        matrix_x,
+                        matrix_y,
+                        selected_particle.0.clone(),
                     );
-
-                    let entity = commands
-                        .spawn((
-                            SpriteBundle {
-                                transform: Transform::from_xyz(
-                                    chunk_position.x,
-                                    chunk_position.y,
-                                    1.0,
-                                ),
-                                sprite: Sprite {
-                                    color: SQUARE_COLOR,
-                                    custom_size: Some(Vec2::splat(CHUNK_SIZE)),
-                                    ..default()
-                                },
-                                ..default()
-                            },
-                            ChunkSquare,
-                        ))
-                        .id();
-
-                    chunk_matrix.matrix[matrix_y][matrix_x] = true;
-                    chunk_matrix.entities[matrix_y][matrix_x] = Some(entity);
-
-                    println!("Square spawned at ({}, {})", matrix_x, matrix_y);
                 }
             }
         }
     }
 }
 
-fn apply_custom_physics(
-    mut chunk_matrix: ResMut<ChunkMatrix>,
-    mut query: Query<&mut Transform, With<ChunkSquare>>,
+fn spawn_particle(
+    commands: &mut Commands,
+    particle_matrix: &mut ParticleMatrix,
+    x: usize,
+    y: usize,
+    particle_type: Particle,
 ) {
+    let chunk_position = Vec2::new(
+        LEFT_WALL + (x as f32 + 0.5) * CHUNK_SIZE,
+        BOTTOM_WALL + (y as f32 + 0.5) * CHUNK_SIZE,
+    );
+
+    let entity = commands
+        .spawn((
+            SpriteBundle {
+                transform: Transform::from_translation(chunk_position.extend(1.0)),
+                sprite: Sprite {
+                    color: particle_type.color(),
+                    custom_size: Some(Vec2::splat(CHUNK_SIZE)),
+                    ..default()
+                },
+                ..default()
+            },
+            particle_type,
+            Position { x, y },
+        ))
+        .id();
+
+    particle_matrix.matrix[y][x] = Some(entity);
+}
+
+fn update_particles(
+    mut commands: Commands,
+    mut particle_query: Query<(Entity, &Particle, &mut Position)>,
+    mut particle_matrix: ResMut<ParticleMatrix>,
+) {
+    let mut rng = rand::thread_rng();
     let mut moves = Vec::new();
-    // First pass: Determine moves
-    for y in 0..MATRIX_HEIGHT {
-        for x in 0..MATRIX_WIDTH {
-            if chunk_matrix.matrix[y][x] {
-                let mut new_y = y;
-                let mut new_x = x;
-                let mut moved = false;
 
-                // Try to move down
-                for _ in 0..GRAVITY as usize {
-                    if new_y > 0 && !chunk_matrix.matrix[new_y - 1][new_x] {
-                        new_y -= 1;
-                        moved = true;
-                    } else {
-                        break;
-                    }
-                }
+    // Determine moves
+    for (entity, particle, position) in particle_query.iter() {
+        let (new_x, new_y) = match particle {
+            Particle::Sand => simulate_sand(position.x, position.y, &particle_matrix, &mut rng),
+            Particle::Liquid => simulate_liquid(position.x, position.y, &particle_matrix, &mut rng),
+            Particle::Solid => (position.x, position.y),
+            Particle::Gas => simulate_gas(position.x, position.y, &particle_matrix, &mut rng),
+            Particle::Smoke => simulate_smoke(position.x, position.y, &particle_matrix, &mut rng),
+        };
 
-                // If can't move down, try to move left or right
-                if !moved && new_y > 0 && chunk_matrix.matrix[new_y - 1][new_x] {
-                    let can_move_left = new_x > 0
-                        && !chunk_matrix.matrix[new_y][new_x - 1]
-                        && !chunk_matrix.matrix[new_y - 1][new_x - 1];
-                    let can_move_right = new_x < MATRIX_WIDTH - 1
-                        && !chunk_matrix.matrix[new_y][new_x + 1]
-                        && !chunk_matrix.matrix[new_y - 1][new_x + 1];
-
-                    if can_move_left && can_move_right {
-                        // Randomly choose left or right
-                        if rand::random() {
-                            new_x -= 1;
-                        } else {
-                            new_x += 1;
-                        }
-                        new_y -= 1;
-                        moved = true;
-                    } else if can_move_left {
-                        new_x -= 1;
-                        new_y -= 1;
-                        moved = true;
-                    } else if can_move_right {
-                        new_x += 1;
-                        new_y -= 1;
-                        moved = true;
-                    }
-                }
-
-                // If the square can move, record the move
-                if moved {
-                    moves.push((x, y, new_x, new_y));
-                }
-            }
+        if new_x != position.x || new_y != position.y {
+            moves.push((entity, new_x, new_y));
         }
     }
 
-    // Second pass: Apply moves
-    for (old_x, old_y, new_x, new_y) in moves {
-        chunk_matrix.matrix[old_y][old_x] = false;
-        chunk_matrix.matrix[new_y][new_x] = true;
-        if let Some(entity) = chunk_matrix.entities[old_y][old_x].take() {
-            chunk_matrix.entities[new_y][new_x] = Some(entity);
-            if let Ok(mut transform) = query.get_mut(entity) {
-                transform.translation.x = LEFT_WALL + (new_x as f32 + 0.5) * CHUNK_SIZE;
-                transform.translation.y = BOTTOM_WALL + (new_y as f32 + 0.5) * CHUNK_SIZE;
+    // Shuffle the moves to prevent bias
+    moves.shuffle(&mut rng);
+
+    // Apply moves
+    for (entity, new_x, new_y) in moves {
+        if let Ok((_, _, mut position)) = particle_query.get_mut(entity) {
+            if particle_matrix.matrix[new_y][new_x].is_none() {
+                particle_matrix.matrix[position.y][position.x] = None;
+                particle_matrix.matrix[new_y][new_x] = Some(entity);
+                position.x = new_x;
+                position.y = new_y;
+
+                let new_translation = Vec3::new(
+                    LEFT_WALL + (new_x as f32 + 0.5) * CHUNK_SIZE,
+                    BOTTOM_WALL + (new_y as f32 + 0.5) * CHUNK_SIZE,
+                    1.0,
+                );
+                commands
+                    .entity(entity)
+                    .insert(Transform::from_translation(new_translation));
             }
         }
-        println!(
-            "Square moved from ({}, {}) to ({}, {})",
-            old_x, old_y, new_x, new_y
-        );
     }
+}
 
-    // Debug print
-    // println!("Matrix state after physics:");
-    // for y in (0..MATRIX_HEIGHT).rev() {
-    //     let row: String = chunk_matrix.matrix[y]
-    //         .iter()
-    //         .map(|&cell| if cell { '#' } else { '.' })
-    //         .collect();
-    //     println!("{}", row);
-    // }
+// Add this helper function to check if a position is within the matrix bounds
+fn is_in_bounds(x: isize, y: isize) -> bool {
+    x >= 0 && x < MATRIX_WIDTH as isize && y >= 0 && y < MATRIX_HEIGHT as isize
+}
+
+// Add this helper function to check if a position is empty
+fn is_empty(particle_matrix: &ParticleMatrix, x: usize, y: usize) -> bool {
+    particle_matrix.matrix[y][x].is_none()
+}
+
+fn simulate_sand(
+    x: usize,
+    y: usize,
+    particle_matrix: &ParticleMatrix,
+    rng: &mut impl Rng,
+) -> (usize, usize) {
+    let x = x as isize;
+    let y = y as isize;
+
+    if is_in_bounds(x, y - 1) && is_empty(particle_matrix, x as usize, (y - 1) as usize) {
+        (x as usize, (y - 1) as usize)
+    } else {
+        let down_left = is_in_bounds(x - 1, y - 1)
+            && is_empty(particle_matrix, (x - 1) as usize, (y - 1) as usize);
+        let down_right = is_in_bounds(x + 1, y - 1)
+            && is_empty(particle_matrix, (x + 1) as usize, (y - 1) as usize);
+
+        if down_left && down_right {
+            if is_empty(particle_matrix, (x - 1) as usize, y as usize)
+                && is_empty(particle_matrix, (x + 1) as usize, y as usize)
+            {
+                if rng.gen_bool(0.5) {
+                    ((x - 1) as usize, (y - 1) as usize)
+                } else {
+                    ((x + 1) as usize, (y - 1) as usize)
+                }
+            } else if is_empty(particle_matrix, (x - 1) as usize, y as usize) {
+                ((x - 1) as usize, (y - 1) as usize)
+            } else if is_empty(particle_matrix, (x + 1) as usize, y as usize) {
+                ((x + 1) as usize, (y - 1) as usize)
+            } else {
+                (x as usize, y as usize)
+            }
+        } else if down_left && is_empty(particle_matrix, (x - 1) as usize, y as usize) {
+            ((x - 1) as usize, (y - 1) as usize)
+        } else if down_right && is_empty(particle_matrix, (x + 1) as usize, y as usize) {
+            ((x + 1) as usize, (y - 1) as usize)
+        } else {
+            (x as usize, y as usize)
+        }
+    }
+}
+
+fn simulate_liquid(
+    x: usize,
+    y: usize,
+    particle_matrix: &ParticleMatrix,
+    rng: &mut impl Rng,
+) -> (usize, usize) {
+    let x = x as isize;
+    let y = y as isize;
+
+    if is_in_bounds(x, y - 1) && is_empty(particle_matrix, x as usize, (y - 1) as usize) {
+        (x as usize, (y - 1) as usize)
+    } else {
+        let left =
+            is_in_bounds(x - 1, y) && is_empty(particle_matrix, (x - 1) as usize, y as usize);
+        let right =
+            is_in_bounds(x + 1, y) && is_empty(particle_matrix, (x + 1) as usize, y as usize);
+
+        if left && right {
+            if rng.gen_bool(0.5) {
+                ((x - 1) as usize, y as usize)
+            } else {
+                ((x + 1) as usize, y as usize)
+            }
+        } else if left {
+            ((x - 1) as usize, y as usize)
+        } else if right {
+            ((x + 1) as usize, y as usize)
+        } else if is_in_bounds(x, y + 1)
+            && is_empty(particle_matrix, x as usize, (y + 1) as usize)
+            && rng.gen_bool(0.1)
+        {
+            (x as usize, (y + 1) as usize) // Small chance to move up (bubbling effect)
+        } else {
+            (x as usize, y as usize)
+        }
+    }
+}
+
+fn simulate_gas(
+    x: usize,
+    y: usize,
+    particle_matrix: &ParticleMatrix,
+    rng: &mut impl Rng,
+) -> (usize, usize) {
+    let x = x as isize;
+    let y = y as isize;
+
+    if is_in_bounds(x, y + 1) && is_empty(particle_matrix, x as usize, (y + 1) as usize) {
+        (x as usize, (y + 1) as usize)
+    } else {
+        let left =
+            is_in_bounds(x - 1, y) && is_empty(particle_matrix, (x - 1) as usize, y as usize);
+        let right =
+            is_in_bounds(x + 1, y) && is_empty(particle_matrix, (x + 1) as usize, y as usize);
+
+        if left && right {
+            if rng.gen_bool(0.5) {
+                ((x - 1) as usize, y as usize)
+            } else {
+                ((x + 1) as usize, y as usize)
+            }
+        } else if left {
+            ((x - 1) as usize, y as usize)
+        } else if right {
+            ((x + 1) as usize, y as usize)
+        } else if is_in_bounds(x, y - 1)
+            && is_empty(particle_matrix, x as usize, (y - 1) as usize)
+            && rng.gen_bool(0.2)
+        {
+            (x as usize, (y - 1) as usize) // Small chance to move down (sinking effect)
+        } else {
+            (x as usize, y as usize)
+        }
+    }
+}
+
+fn simulate_smoke(
+    x: usize,
+    y: usize,
+    particle_matrix: &ParticleMatrix,
+    rng: &mut impl Rng,
+) -> (usize, usize) {
+    let x = x as isize;
+    let y = y as isize;
+
+    if is_in_bounds(x, y + 1) && is_empty(particle_matrix, x as usize, (y + 1) as usize) {
+        (x as usize, (y + 1) as usize)
+    } else {
+        let left =
+            is_in_bounds(x - 1, y) && is_empty(particle_matrix, (x - 1) as usize, y as usize);
+        let right =
+            is_in_bounds(x + 1, y) && is_empty(particle_matrix, (x + 1) as usize, y as usize);
+
+        if left && right {
+            match rng.gen_range(0..10) {
+                0..=6 => (x as usize, y as usize), // 70% chance to stay in place
+                7..=8 => ((x - 1) as usize, y as usize), // 20% chance to move left
+                _ => ((x + 1) as usize, y as usize), // 10% chance to move right
+            }
+        } else if left {
+            if rng.gen_bool(0.3) {
+                ((x - 1) as usize, y as usize)
+            } else {
+                (x as usize, y as usize)
+            }
+        } else if right {
+            if rng.gen_bool(0.3) {
+                ((x + 1) as usize, y as usize)
+            } else {
+                (x as usize, y as usize)
+            }
+        } else {
+            (x as usize, y as usize)
+        }
+    }
+}
+
+enum WallLocation {
+    Left,
+    Right,
+    Bottom,
+    Top,
+}
+
+fn main() {
+    App::new()
+        .add_plugins(DefaultPlugins)
+        .add_systems(Startup, setup)
+        .insert_resource(MouseState {
+            button_pressed: false,
+        })
+        .add_systems(
+            Update,
+            (
+                edge_scrolling,
+                zoom_camera,
+                handle_input,
+                update_particles,
+                update_mouse_state,
+            ),
+        )
+        .run();
 }
